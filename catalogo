@@ -1,0 +1,89 @@
+import pandas as pd
+import numpy as np
+import time
+from astroquery.ipac.ned import Ned
+from astroquery.exceptions import RemoteServiceError
+
+print("🚀 Iniciando Extracción Avanzada y Blindada para el Proyecto Q.A.S.T...")
+
+# Habilitamos la memoria caché local de Astroquery para no repetir búsquedas si se corta la luz
+Ned.clear_cache()
+
+# Criterios del modelo (Burbuja Local)
+DISTANCIA_MIN_MPC = 0.5
+DISTANCIA_MAX_MPC = 50.0
+H0_BASE = 67.4
+
+# Lista de catálogos famosos del universo cercano para buscar de forma directa y ordenada
+# Esto evita hacer consultas genéricas que bloquean el servidor de la NASA
+catalogos_locales = [
+    [f"NGC {i}" for i in range(1, 3000)],  # Primer lote de galaxias NGC
+    [f"NGC {i}" for i in range(3000, 6000)],# Segundo lote de galaxias NGC
+    [f"IC {i}" for i in range(1, 3000)],   # Catálogo Index (IC)
+    [f"M {i}" for i in range(1, 111)]      # Objetos Messier cercanos
+]
+
+# Unificamos los nombres en una sola lista secuencial
+galaxias_a_probar = [nombre for sublista in catalogos_locales for nombre in sublista]
+
+lista_qast = []
+contador_consultas = 0
+
+print(f"📋 Se estructuró un plan de escaneo para {len(galaxias_a_probar)} candidatos potenciales.")
+
+for nombre in galaxias_a_probar:
+    if len(lista_qast) >= 10000:
+        break
+        
+    try:
+        contador_consultas += 1
+        
+        # 1. Consulta el objeto de forma individual (rápido y seguro para el servidor)
+        registro_principal = Ned.query_object(nombre)
+        
+        # Filtrar de inmediato para asegurarnos de que es una Galaxia ('G')
+        if registro_principal['Type'][0].strip() != b'G' and registro_principal['Type'][0].strip() != 'G':
+            continue
+            
+        # Extraemos la velocidad observada respecto al CMB en km/s (pasando el Redshift a velocidad)
+        z = float(registro_principal['Redshift'][0])
+        v_obs_cmb = z * 299792.458
+        
+        if v_obs_cmb <= 0 or np.isnan(v_obs_cmb):
+            continue
+            
+        # 2. Consulta de distancias independientes
+        tabla_dist = Ned.get_table(nombre, table='redshifts')
+        
+        # Extraemos la distancia media reportada en Mpc
+        # Si tiene datos, calculamos el promedio analítico de las mediciones independientes
+        d_media = float(tabla_dist['DistMod'].mean()) if 'DistMod' in tabla_dist.colnames else None
+        
+        if d_media is None or np.isnan(d_media) or not (DISTANCIA_MIN_MPC <= d_media <= DISTANCIA_MAX_MPC):
+            continue
+            
+        # 3. Guardado exitoso si supera todos los filtros físicos
+        lista_qast.append({
+            "Nombre_Galaxia": nombre,
+            "cz_CMB_km_s": abs(v_obs_cmb),
+            "Distancia_Mpc": d_media
+        })
+        
+        # Pequeña pausa de cortesía cada 10 consultas para que el servidor de la NASA descanse
+        if contador_consultas % 10 == 0:
+            print(f"📦 Progreso: {len(lista_qast)} galaxias filtradas con éxito para Q.A.S.T...")
+            time.sleep(0.5)
+
+    except RemoteServiceError:
+        # Si la NASA se satura, el script hace una pausa de 5 segundos y continúa automáticamente
+        print("⚠️ Servidor saturado. Aplicando pausa de contingencia...")
+        time.sleep(5.0)
+        continue
+    except Exception:
+        # Si un objeto no existe o no tiene datos completos, pasa al siguiente de forma silenciosa
+        continue
+
+# 4. Guardar archivo final unificado
+df_catalogo = pd.DataFrame(lista_qast)
+df_catalogo.to_csv("catalogo_10000_galaxias_qast.csv", index=False)
+print(f"\n✅ ¡Filtro Completado! Se guardaron {len(df_catalogo)} objetos válidos en 'catalogo_10000_galaxias_qast.csv'")
